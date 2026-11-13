@@ -155,6 +155,42 @@ def dedupe_count(df_in: pd.DataFrame) -> int:
     return len(with_doi) + len(without_doi)
 
 
+
+def validate_classifier(model, X_train, y_train) -> None:
+    """Reviewer request: report how the classifier was validated.
+
+    Stratified 5-fold cross-validation on the training set (reference articles vs mined
+    off-topic records). Prints mean +/- sd of accuracy, precision, recall and F1 and saves
+    them next to the output file.
+    """
+    from sklearn.base import clone
+    from sklearn.model_selection import StratifiedKFold, cross_validate
+
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    scores = cross_validate(clone(model), X_train, y_train, cv=cv,
+                            scoring=["accuracy", "precision", "recall", "f1"])
+    rows = []
+    for m in ["accuracy", "precision", "recall", "f1"]:
+        v = scores[f"test_{m}"]
+        rows.append({"metric": m, "mean": round(v.mean(), 4), "sd": round(v.std(), 4)})
+        print(f"5-fold CV {m}: {v.mean():.3f} +/- {v.std():.3f}")
+    pd.DataFrame(rows).to_excel(OUTPUT_FILE.with_name(OUTPUT_FILE.stem + "_cv_metrics.xlsx"), index=False)
+
+
+def export_manual_check_sample(df_out: pd.DataFrame, n: int = 100) -> None:
+    """Reviewer request: estimate real-world precision of the retained records.
+
+    Draws a random sample (seed 42) of retained records with an empty 'relevant' column,
+    to be labelled by hand (1 = relevant, 0 = not relevant). Precision = mean of the column.
+    """
+    sample = df_out.sample(n=min(n, len(df_out)), random_state=42).copy()
+    sample["relevant (1/0)"] = ""
+    cols = [c for c in ["display_name", "publication_year", "source", "keywords", "abstract",
+                        "relevant (1/0)"] if c in sample.columns]
+    sample[cols].to_excel(OUTPUT_FILE.with_name(OUTPUT_FILE.stem + "_manual_check.xlsx"), index=False)
+    print(f"Manual-check sample saved ({len(sample)} records)")
+
+
 def main() -> None:
     if not REFERENCE_FILE.exists():
         raise SystemExit(f"Reference file not found: {REFERENCE_FILE}")
@@ -203,6 +239,7 @@ def main() -> None:
         ]
     )
     model.fit(X_train, y_train)
+    validate_classifier(model, X_train, y_train)
 
     gate_text = raw_text(df_gate)
     df_gate["_ai_score"] = model.predict_proba(gate_text)[:, 1]
@@ -270,6 +307,7 @@ def main() -> None:
             df_final[col] = ""
 
     out = df_final[raw_cols].copy().reset_index(drop=True)
+    export_manual_check_sample(out)
     out.to_excel(OUTPUT_FILE, index=False)
     print(f"Saved clean output: {OUTPUT_FILE} ({len(out)} rows)")
 
